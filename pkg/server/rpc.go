@@ -130,12 +130,17 @@ func (h *rpcHandlerImpl[RequestType, ResponseType]) run(s *RPCServer) {
 				if ir == nil {
 					continue
 				}
+				if o := s.RequestObserver; o != nil {
+					o.OnRequestReceived(h.i.RPCInfo)
+				}
 				if time.Now().UnixNano() < ir.Expiry {
 					go func() {
 						if err := h.handleRequest(s, ir); err != nil {
 							logger.Error(err, "failed to handle request", "requestID", ir.RequestId)
 						}
 					}()
+				} else if o := s.RequestObserver; o != nil {
+					o.OnRequestExpired(h.i.RPCInfo, time.Since(time.Unix(0, ir.Expiry)))
 				}
 
 			case claim := <-claims:
@@ -228,6 +233,13 @@ func (h *rpcHandlerImpl[RequestType, ResponseType]) claimRequest(
 	if err != nil {
 		return false, err
 	}
+	// Measured from bid publication, so wait is the client's decision latency.
+	claimedAt := time.Now()
+	observeClaim := func(outcome psrpc.ClaimOutcome) {
+		if o := s.RequestObserver; o != nil {
+			o.OnClaim(h.i.RPCInfo, outcome, time.Since(claimedAt))
+		}
+	}
 
 	timeout := time.NewTimer(time.Duration(ir.Expiry - time.Now().UnixNano()))
 	defer timeout.Stop()
@@ -235,12 +247,17 @@ func (h *rpcHandlerImpl[RequestType, ResponseType]) claimRequest(
 	select {
 	case claim := <-claimResponseChan:
 		if claim.ServerId == s.ID {
+			observeClaim(psrpc.ClaimGranted)
 			return true, nil
 		} else {
+			observeClaim(psrpc.ClaimLostToPeer)
 			return false, nil
 		}
 
 	case <-timeout.C:
+		// Timer is set to request expiry, so this fires only after the client can
+		// no longer grant the claim.
+		observeClaim(psrpc.ClaimTimedOut)
 		return false, nil
 	}
 }

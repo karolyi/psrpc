@@ -32,6 +32,7 @@ type ServerOpts struct {
 	Interceptors       []ServerRPCInterceptor
 	StreamInterceptors []StreamInterceptor
 	ChainedInterceptor ServerRPCInterceptor
+	RequestObserver    RequestObserver
 }
 
 func WithServerID(id string) ServerOption {
@@ -79,5 +80,57 @@ func WithServerOptions(opts ...ServerOption) ServerOption {
 		for _, opt := range opts {
 			opt(o)
 		}
+	}
+}
+
+// ClaimOutcome is the result of the claim negotiation for a single request.
+type ClaimOutcome int
+
+const (
+	// ClaimGranted: this server won the claim; the handler runs.
+	ClaimGranted ClaimOutcome = iota
+	// ClaimLostToPeer: another server won. Expected on broadcast RPCs; on a
+	// queue RPC it implies more than one member received the request.
+	ClaimLostToPeer
+	// ClaimTimedOut: this server bid and the claim expired ungranted. The
+	// handler does not run, so the request is safe to retry.
+	ClaimTimedOut
+)
+
+func (o ClaimOutcome) String() string {
+	switch o {
+	case ClaimGranted:
+		return "granted"
+	case ClaimLostToPeer:
+		return "lost_to_peer"
+	case ClaimTimedOut:
+		return "timed_out"
+	default:
+		return "invalid"
+	}
+}
+
+// RequestObserver receives server-side lifecycle events for requests that
+// never reach the handler, and so are invisible to ServerRPCInterceptor.
+//
+// Implementations must not block: OnRequestReceived and OnRequestExpired are
+// called on the request read loop, OnClaim on the claiming goroutine.
+type RequestObserver interface {
+	// OnRequestReceived fires once per request read off the bus, before the
+	// expiry check and before dispatch.
+	OnRequestReceived(info RPCInfo)
+	// OnRequestExpired fires when a request is read after its expiry. The
+	// handler is not invoked; lateBy is the interval past expiry.
+	OnRequestExpired(info RPCInfo, lateBy time.Duration)
+	// OnClaim fires once the claim negotiation settles, with the time spent
+	// waiting for the client's decision.
+	OnClaim(info RPCInfo, outcome ClaimOutcome, wait time.Duration)
+}
+
+// WithServerObserver installs a RequestObserver. Nil is the default and
+// disables all lifecycle events.
+func WithServerObserver(observer RequestObserver) ServerOption {
+	return func(o *ServerOpts) {
+		o.RequestObserver = observer
 	}
 }
