@@ -58,6 +58,13 @@ func newRPCHandler[RequestType proto.Message, ResponseType proto.Message](
 	affinityFunc AffinityFunc[RequestType],
 ) (*rpcHandlerImpl[RequestType, ResponseType], error) {
 
+	// Nothing to arbitrate once the queue has chosen, and a declining affinity
+	// function would drop the request with no response.
+	if i.Queue && affinityFunc != nil {
+		return nil, psrpc.NewErrorf(psrpc.InvalidArgument,
+			"%s: affinity function is not valid on a queue rpc", i.Method)
+	}
+
 	ctx := context.Background()
 
 	var requestSub bus.Subscription[*internal.Request]
@@ -183,8 +190,7 @@ func (h *rpcHandlerImpl[RequestType, ResponseType]) handleRequest(
 	}
 
 	if h.i.RequireClaim {
-		claimed, err := h.claimRequest(s, ctx, ir, req)
-		if err != nil {
+		if claimed, err := h.claimRequest(s, ctx, ir, req); err != nil {
 			return err
 		} else if !claimed {
 			return nil
@@ -213,25 +219,43 @@ func (h *rpcHandlerImpl[RequestType, ResponseType]) claimRequest(
 		affinity = 1
 	}
 
-	claimResponseChan := make(chan *internal.ClaimResponse, 1)
+	// A queue subscription already chose this server, so the claim is announced
+	// rather than negotiated. Queue is re-checked because honoring SkipClaim on a
+	// broadcast rpc would let every server run the handler.
+	handling := ir.SkipClaim && h.i.Queue
 
-	h.mu.Lock()
-	h.claims[ir.RequestId] = claimResponseChan
-	h.mu.Unlock()
+	var claimResponseChan chan *internal.ClaimResponse
+	if !handling {
+		claimResponseChan = make(chan *internal.ClaimResponse, 1)
 
-	defer func() {
 		h.mu.Lock()
-		delete(h.claims, ir.RequestId)
+		h.claims[ir.RequestId] = claimResponseChan
 		h.mu.Unlock()
-	}()
+
+		defer func() {
+			h.mu.Lock()
+			delete(h.claims, ir.RequestId)
+			h.mu.Unlock()
+		}()
+	}
 
 	err := s.bus.Publish(ctx, info.GetClaimRequestChannel(s.Name, ir.ClientId), &internal.ClaimRequest{
 		RequestId: ir.RequestId,
 		ServerId:  s.ID,
 		Affinity:  affinity,
+		Handling:  handling,
 	})
 	if err != nil {
 		return false, err
+	}
+
+	// Failing above rather than handling anyway keeps the caller from timing out
+	// and retrying a request this server already ran.
+	if handling {
+		if o := s.RequestObserver; o != nil {
+			o.OnClaim(h.i.RPCInfo, psrpc.ClaimSkipped, 0)
+		}
+		return true, nil
 	}
 	// Measured from bid publication, so wait is the client's decision latency.
 	claimedAt := time.Now()

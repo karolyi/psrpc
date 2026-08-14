@@ -95,11 +95,12 @@ func OpenStream[SendType, RecvType proto.Message](
 	}
 
 	if i.RequireClaim {
-		serverID, err := selectServer(ctx, claimChan, nil, o.SelectionOpts)
+		sel, err := selectServer(ctx, claimChan, nil, o.SelectionOpts)
 		if err != nil {
 			_ = cs.Close(err)
 			return nil, err
 		}
+		serverID := sel.serverID
 
 		if err = c.bus.Publish(ctx, i.GetClaimResponseChannel(), &internal.ClaimResponse{
 			RequestId: requestID,

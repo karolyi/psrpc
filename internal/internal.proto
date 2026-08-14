@@ -38,6 +38,8 @@ message Request {
   google.protobuf.Any request = 6;
   map<string, string> metadata = 7;
   bytes raw_request = 8;
+  // Advisory: the caller still answers a claim, so older servers are unaffected.
+  bool skip_claim = 9;
 }
 
 message Response {
@@ -55,6 +57,9 @@ message ClaimRequest {
   string request_id = 1;
   string server_id = 2;
   float affinity = 3;
+  // Handling has begun and no ClaimResponse is awaited. Announced so the caller
+  // can tell a slow handler from a request nobody received.
+  bool handling = 4;
 }
 
 message ClaimResponse {
